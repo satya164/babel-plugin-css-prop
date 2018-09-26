@@ -5,7 +5,8 @@ const syntax = require('@babel/plugin-syntax-jsx').default;
 
 /*::
 type State = {
-  components: Array<{ id: any, value: any }>
+  required: boolean;
+  items: Array<any>
 }
 */
 
@@ -27,17 +28,31 @@ module.exports = function(
     visitor: {
       Program: {
         enter(path /*: any */, state /*: State */) {
-          state.components = [];
+          // Whether we've inserted the require statement
+          state.required = false;
+          // Nodes to insert
+          state.items = [];
         },
 
         exit(path /*: any */, state /*: State */) {
-          if (!state.components.length) {
-            return;
-          }
+          // Add the new nodes to the end of the program
+          path.node.body.push(...state.items);
+        },
+      },
 
-          const bindings = path.scope.getAllBindings();
+      JSXAttribute(path /*: any */, state /*: State */) {
+        if (path.node.name.name !== 'css') {
+          // Don't do anything if we didn't find an attribute named 'css'
+          return;
+        }
 
+        // Get all the bindings in the program scope
+        const { bindings } = path.findParent(p => p.type === 'Program').scope;
+
+        if (!state.required) {
+          // If we haven't inserted a require statement, now is the time
           if (!bindings.styled) {
+            // The binding doesn't exist, we need to insert the require
             let library;
 
             if (target === 'auto') {
@@ -48,11 +63,12 @@ module.exports = function(
               let dependencies;
 
               try {
+                // Read the package.json to determine the library
                 /* $FlowFixMe */
                 dependencies = require(join(process.cwd(), 'package.json'))
                   .dependencies;
               } catch (e) {
-                throw new Error(
+                throw path.buildCodeFrameError(
                   "Couldn't read 'package.json' to determine the CSS in JS library.\n" +
                     message
                 );
@@ -63,7 +79,7 @@ module.exports = function(
               } else if (dependencies && dependencies['styled-components']) {
                 library = 'styled-components';
               } else {
-                throw new Error(
+                throw path.buildCodeFrameError(
                   "Couldn't find 'linaria' or 'styled-components' in the 'package.json'.\n" +
                     message
                 );
@@ -73,7 +89,8 @@ module.exports = function(
             }
 
             if (library === 'linaria') {
-              path.node.body.push(
+              // Insert `var styled = require('linaria/react').styled`
+              state.items.push(
                 t.variableDeclaration('var', [
                   t.variableDeclarator(
                     t.identifier('styled'),
@@ -87,7 +104,8 @@ module.exports = function(
                 ])
               );
             } else if (library === 'styled-components') {
-              path.node.body.push(
+              // Insert `var styled = require('styled-components')`
+              state.items.push(
                 t.variableDeclaration('var', [
                   t.variableDeclarator(
                     t.identifier('styled'),
@@ -100,17 +118,7 @@ module.exports = function(
             }
           }
 
-          const elems = state.components.map(c =>
-            t.variableDeclaration('var', [t.variableDeclarator(c.id, c.value)])
-          );
-
-          path.node.body.push(...elems);
-        },
-      },
-
-      JSXAttribute(path /*: any */, state /*: State */) {
-        if (path.node.name.name !== 'css') {
-          return;
+          state.required = true;
         }
 
         const elem = path.parentPath;
@@ -160,8 +168,6 @@ module.exports = function(
           elem.parentPath.node.closingElement.name.name = id.name;
         }
 
-        const { bindings } = path.findParent(p => p.type === 'Program').scope;
-
         css.expressions = css.expressions.reduce((acc, ex) => {
           if (
             Object.entries(bindings).some(([, b] /*: any */) =>
@@ -190,10 +196,11 @@ module.exports = function(
           return acc;
         }, []);
 
-        state.components.push({
-          id,
-          value: t.taggedTemplateExpression(styled, css),
-        });
+        state.items.push(
+          t.variableDeclaration('var', [
+            t.variableDeclarator(id, t.taggedTemplateExpression(styled, css)),
+          ])
+        );
       },
     },
   };
