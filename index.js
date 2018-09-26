@@ -1,5 +1,6 @@
 /* @flow */
 
+const { join } = require('path');
 const syntax = require('@babel/plugin-syntax-jsx').default;
 
 /*::
@@ -8,7 +9,16 @@ type State = {
 }
 */
 
-module.exports = function(babel /*: any */) {
+/* ::
+type Options = {
+  target?: 'linaria' | 'styled-components' | 'auto' | 'none',
+}
+*/
+
+module.exports = function(
+  babel /*: any */,
+  { target = 'auto' } /*: Options */
+) {
   const { types: t } = babel;
 
   return {
@@ -21,6 +31,75 @@ module.exports = function(babel /*: any */) {
         },
 
         exit(path /*: any */, state /*: State */) {
+          if (!state.components.length) {
+            return;
+          }
+
+          const bindings = path.scope.getAllBindings();
+
+          if (!bindings.styled) {
+            let library;
+
+            if (target === 'auto') {
+              const message =
+                "Please specify the name of one of these libraries in the 'target' option: 'linaria', 'styled-components'.\n" +
+                "If you don't want to insert 'require' statement from  'styled', set the target to 'none'.";
+
+              let dependencies;
+
+              try {
+                /* $FlowFixMe */
+                dependencies = require(join(process.cwd(), 'package.json'))
+                  .dependencies;
+              } catch (e) {
+                throw new Error(
+                  "Couldn't read 'package.json' to determine the CSS in JS library.\n" +
+                    message
+                );
+              }
+
+              if (dependencies && dependencies.linaria) {
+                library = 'linaria';
+              } else if (dependencies && dependencies['styled-components']) {
+                library = 'styled-components';
+              } else {
+                throw new Error(
+                  "Couldn't find 'linaria' or 'styled-components' in the 'package.json'.\n" +
+                    message
+                );
+              }
+            } else {
+              library = target;
+            }
+
+            if (library === 'linaria') {
+              path.node.body.push(
+                t.variableDeclaration('var', [
+                  t.variableDeclarator(
+                    t.identifier('styled'),
+                    t.memberExpression(
+                      t.callExpression(t.identifier('require'), [
+                        t.stringLiteral('linaria/react'),
+                      ]),
+                      t.identifier('styled')
+                    )
+                  ),
+                ])
+              );
+            } else if (library === 'styled-components') {
+              path.node.body.push(
+                t.variableDeclaration('var', [
+                  t.variableDeclarator(
+                    t.identifier('styled'),
+                    t.callExpression(t.identifier('require'), [
+                      t.stringLiteral('styled-components'),
+                    ])
+                  ),
+                ])
+              );
+            }
+          }
+
           const elems = state.components.map(c =>
             t.variableDeclaration('var', [t.variableDeclarator(c.id, c.value)])
           );
