@@ -3,9 +3,42 @@
 const { join } = require('path');
 const syntax = require('@babel/plugin-syntax-jsx').default;
 
+const imports = (t, p, named, source) => {
+  if (
+    (named ? t.isImportSpecifier(p) : t.isImportDefaultSpecifier(p)) &&
+    t.isImportDeclaration(p.parentPath)
+  ) {
+    return p.parentPath.node.source.value === source;
+  }
+
+  if (t.isVariableDeclarator(p)) {
+    const call =
+      t.isMemberExpression(p.node.init) && named
+        ? p.node.init.object
+        : p.node.init;
+
+    if (
+      t.isCallExpression(call) &&
+      t.isIdentifier(call.callee) &&
+      call.callee.name === 'require' &&
+      call.arguments.length === 1
+    ) {
+      const node = call.arguments[0];
+
+      if (t.isStringLiteral(node)) {
+        return node.value === source;
+      } else if (t.isTemplateLiteral(node) && node.quasis.length === 1) {
+        return node.quasis[0].value.cooked === source;
+      }
+    }
+  }
+
+  return false;
+};
+
 /*::
 type State = {
-  required: boolean;
+  required: 'pending' | 'linaria' | 'styled-components' | 'none';
   items: Array<any>
 }
 */
@@ -29,7 +62,7 @@ module.exports = function(
       Program: {
         enter(path /*: any */, state /*: State */) {
           // Whether we've inserted the require statement
-          state.required = false;
+          state.required = 'pending';
           // Nodes to insert
           state.items = [];
         },
@@ -49,9 +82,20 @@ module.exports = function(
         // Get all the bindings in the program scope
         const { bindings } = path.findParent(p => p.type === 'Program').scope;
 
-        if (!state.required) {
+        if (state.required === 'pending') {
           // If we haven't inserted a require statement, now is the time
-          if (!bindings.styled) {
+          if (bindings.styled) {
+            // If the binding already exists, try to determine the library
+            const { path: p } = bindings.styled;
+
+            if (imports(t, p, true, 'linaria/react')) {
+              state.required = 'linaria';
+            } else if (imports(t, p, false, 'styled-components')) {
+              state.required = 'styled-components';
+            } else {
+              state.required = 'none';
+            }
+          } else {
             // The binding doesn't exist, we need to insert the require
             let library;
 
@@ -90,6 +134,7 @@ module.exports = function(
 
             if (library === 'linaria') {
               // Insert `var styled = require('linaria/react').styled`
+              state.required = library;
               state.items.push(
                 t.variableDeclaration('var', [
                   t.variableDeclarator(
@@ -105,6 +150,7 @@ module.exports = function(
               );
             } else if (library === 'styled-components') {
               // Insert `var styled = require('styled-components')`
+              state.required = library;
               state.items.push(
                 t.variableDeclaration('var', [
                   t.variableDeclarator(
@@ -115,10 +161,10 @@ module.exports = function(
                   ),
                 ])
               );
+            } else {
+              state.required = 'none';
             }
           }
-
-          state.required = true;
         }
 
         const elem = path.parentPath;
